@@ -25,46 +25,50 @@ jobs:
           THRESHOLD: ${{ secrets.THRESHOLD }}
         run: |
           python << 'PY'
-          import os, io, chardet, pandas as pd
+          import os, io, chardet, pandas as pd, csv, re
           import paramiko
-
+          
           host=os.environ["SFTP_HOST"]; user=os.environ["SFTP_USER"]; pw=os.environ["SFTP_PASS"]
           path=os.environ["SFTP_PATH"];  thr=int(os.environ.get("THRESHOLD","6"))
-
+          
           # SFTP laden
           t=paramiko.Transport((host,22)); t.connect(username=user,password=pw)
           s=paramiko.SFTPClient.from_transport(t)
           buf=io.BytesIO(); s.getfo(path, buf); s.close(); t.close()
           data=buf.getvalue()
-
-          enc=chardet.detect(data)["encoding"] or "utf-8"
-          text=data.decode(enc, errors="replace")
-
-          # Semikolons → Komma
-          text=text.replace(";", ",")
-
-          # CSV einlesen
-          df=pd.read_csv(io.StringIO(text))
-
-          # Erwartete Spalten:
-          #   "Variant SKU" und "Variant Inventory Qty" (oder "Quantity")
-          if "Variant Inventory Qty" in df.columns:
-              qty_col="Variant Inventory Qty"
-          elif "Quantity" in df.columns:
-              qty_col="Quantity"
-          else:
-              raise SystemExit("Keine Mengen-Spalte gefunden (erwartet: Quantity oder Variant Inventory Qty)")
-
-          if "Variant SKU" not in df.columns:
-              raise SystemExit("Spalte 'Variant SKU' fehlt (SKU muss vorhanden sein)")
-
-          # Sicherheitsbestand abziehen
-          df["Variant Inventory Qty"] = (df[qty_col].fillna(0).astype(float) - thr).clip(lower=0).astype(int)
-
-          # Minimal-CSV für Matrixify
-          out=df[["Variant SKU","Variant Inventory Qty"]].copy()
-          out.to_csv("stocklist_utf8.csv", index=False)
-
+          
+          # Encoding erkennen & dekodieren
+          enc = chardet.detect(data)["encoding"] or "utf-8"
+          text = data.decode(enc, errors="replace")
+          
+          # Als SEMIKOLON-CSV einlesen (keine Ersetzung vorab!)
+          df = pd.read_csv(
+              io.StringIO(text),
+              sep=';',
+              engine='python',           # robuster bei unregelmäßigen Zeilen
+              quoting=csv.QUOTE_MINIMAL,
+              dtype=str,                 # alles als Text einlesen
+              keep_default_na=False,
+              on_bad_lines='skip'        # problematische Zeilen überspringen statt crashen
+          )
+          
+          # Spalten finden
+          qty_col = "Variant Inventory Qty" if "Variant Inventory Qty" in df.columns else "Quantity"
+          if qty_col not in df.columns: raise SystemExit("Mengen-Spalte fehlt (Quantity oder Variant Inventory Qty).")
+          if "Variant SKU" not in df.columns: raise SystemExit("Spalte 'Variant SKU' fehlt.")
+          
+          # Menge bereinigen (Zahlen aus Text holen, Dezimal-Komma erlauben)
+          def to_num(x):
+              if x is None: return 0
+              x = str(x).strip().replace('.', '').replace(',', '.')
+              m = re.search(r"-?\d+(\.\d+)?", x)
+              return float(m.group()) if m else 0.0
+          
+          df["Variant Inventory Qty"] = df[qty_col].map(to_num).sub(thr).clip(lower=0).astype(int)
+          
+          # Nur benötigte Spalten für Matrixify
+          out = df[["Variant SKU","Variant Inventory Qty"]].copy()
+          out.to_csv("stocklist_utf8.csv", index=False)   # Komma-getrennt ausgeben
           print(out.head())
           PY
 
