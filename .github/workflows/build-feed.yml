@@ -45,30 +45,42 @@ jobs:
           df = pd.read_csv(
               io.StringIO(text),
               sep=';',
-              engine='python',           # robuster bei unregelmäßigen Zeilen
+              engine='python',
               quoting=csv.QUOTE_MINIMAL,
-              dtype=str,                 # alles als Text einlesen
+              dtype=str,
               keep_default_na=False,
-              on_bad_lines='skip'        # problematische Zeilen überspringen statt crashen
+              on_bad_lines='skip'
           )
           
-          # Spalten finden
-          qty_col = "Variant Inventory Qty" if "Variant Inventory Qty" in df.columns else "Quantity"
-          if qty_col not in df.columns: raise SystemExit("Mengen-Spalte fehlt (Quantity oder Variant Inventory Qty).")
-          if "Variant SKU" not in df.columns: raise SystemExit("Spalte 'Variant SKU' fehlt.")
+          # Spaltennamen vereinheitlichen
+          rename_map = {
+              "ItemNo": "Variant SKU",
+              "Quantity": "Variant Inventory Qty",
+              "Variant Inventory Quantity": "Variant Inventory Qty",
+              "Stock": "Variant Inventory Qty"
+          }
+          df.rename(columns=rename_map, inplace=True)
           
-          # Menge bereinigen (Zahlen aus Text holen, Dezimal-Komma erlauben)
+          # Prüfen, ob erforderliche Spalten vorhanden sind
+          if "Variant SKU" not in df.columns:
+              raise SystemExit("Fehler: Spalte 'ItemNo' bzw. 'Variant SKU' fehlt.")
+          if "Variant Inventory Qty" not in df.columns:
+              raise SystemExit("Fehler: Spalte 'Quantity' bzw. 'Variant Inventory Qty' fehlt.")
+          
+          # Menge bereinigen (Zahlen extrahieren & Sicherheitsbestand abziehen)
           def to_num(x):
-              if x is None: return 0
+              import re
+              if not x: return 0
               x = str(x).strip().replace('.', '').replace(',', '.')
               m = re.search(r"-?\d+(\.\d+)?", x)
               return float(m.group()) if m else 0.0
           
-          df["Variant Inventory Qty"] = df[qty_col].map(to_num).sub(thr).clip(lower=0).astype(int)
+          thr = int(os.environ.get("THRESHOLD", "6"))
+          df["Variant Inventory Qty"] = df["Variant Inventory Qty"].map(to_num).sub(thr).clip(lower=0).astype(int)
           
-          # Nur benötigte Spalten für Matrixify
-          out = df[["Variant SKU","Variant Inventory Qty"]].copy()
-          out.to_csv("stocklist_utf8.csv", index=False)   # Komma-getrennt ausgeben
+          # Nur benötigte Spalten für Matrixify exportieren
+          out = df[["Variant SKU", "Variant Inventory Qty"]].copy()
+          out.to_csv("stocklist_utf8.csv", index=False)
           print(out.head())
           PY
 
